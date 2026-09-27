@@ -1,0 +1,550 @@
+"""
+Industrial Sensor Anomaly Detection
+====================================
+
+A baseline ML pipeline for detecting anomalous behaviour
+in multivariate industrial sensor data.
+
+Expected CSV format:
+    sensor_1, sensor_2, sensor_3, ..., anomaly
+
+where:
+    anomaly = 0 -> normal
+    anomaly = 1 -> anomalous
+
+The script supports:
+
+1. Supervised learning
+   - preprocessing
+   - leakage-aware train/test split
+   - Random Forest
+   - precision
+   - recall
+   - F1
+   - ROC-AUC
+   - PR-AUC
+   - confusion matrix
+   - feature importance
+
+2. Unsupervised learning
+   - Isolation Forest
+   - anomaly scoring
+
+Install:
+    pip install pandas numpy scikit-learn
+
+Run supervised:
+    python industrial_sensor_anomaly_detection.py \
+        --data sensor_data.csv
+
+Run unsupervised:
+    python industrial_sensor_anomaly_detection.py \
+        --data sensor_data.csv \
+        --unsupervised
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from sklearn.ensemble import (
+    IsolationForest,
+    RandomForestClassifier,
+)
+
+from sklearn.impute import SimpleImputer
+
+from sklearn.metrics import (
+    average_precision_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+
+
+RANDOM_STATE = 42
+
+
+# ============================================================
+# DATA LOADING
+# ============================================================
+
+def load_dataset(file_path: str) -> pd.DataFrame:
+
+    path = Path(file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Dataset not found: {path}"
+        )
+
+    if path.suffix.lower() != ".csv":
+        raise ValueError(
+            "Currently only CSV datasets are supported."
+        )
+
+    df = pd.read_csv(path)
+
+    if df.empty:
+        raise ValueError("The dataset is empty.")
+
+    # Replace infinite numerical values with NaN.
+    df = df.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    return df
+
+
+# ============================================================
+# FEATURE PREPARATION
+# ============================================================
+
+def prepare_features(
+    df: pd.DataFrame,
+    target_column: str | None = None
+) -> pd.DataFrame:
+
+    excluded = []
+
+    if target_column is not None:
+        excluded.append(target_column)
+
+    X = df.drop(
+        columns=excluded,
+        errors="ignore"
+    )
+
+    # Initial version intentionally focuses on numerical
+    # industrial sensor measurements.
+    X = X.select_dtypes(
+        include=np.number
+    )
+
+    if X.empty:
+        raise ValueError(
+            "No numerical sensor features were found."
+        )
+
+    return X
+
+
+# ============================================================
+# EVALUATION
+# ============================================================
+
+def evaluate_classifier(
+    y_true,
+    predictions,
+    probabilities=None
+):
+
+    print("\n" + "=" * 70)
+    print("CLASSIFICATION REPORT")
+    print("=" * 70)
+
+    print(
+        classification_report(
+            y_true,
+            predictions,
+            digits=4,
+            zero_division=0
+        )
+    )
+
+    print("\nConfusion Matrix:")
+    print(
+        confusion_matrix(
+            y_true,
+            predictions
+        )
+    )
+
+    precision = precision_score(
+        y_true,
+        predictions,
+        zero_division=0
+    )
+
+    recall = recall_score(
+        y_true,
+        predictions,
+        zero_division=0
+    )
+
+    f1 = f1_score(
+        y_true,
+        predictions,
+        zero_division=0
+    )
+
+    print(
+        f"\nPrecision : {precision:.4f}"
+    )
+
+    print(
+        f"Recall    : {recall:.4f}"
+    )
+
+    print(
+        f"F1-score  : {f1:.4f}"
+    )
+
+    if probabilities is not None:
+
+        if len(np.unique(y_true)) == 2:
+
+            roc_auc = roc_auc_score(
+                y_true,
+                probabilities
+            )
+
+            pr_auc = average_precision_score(
+                y_true,
+                probabilities
+            )
+
+            print(
+                f"ROC-AUC   : {roc_auc:.4f}"
+            )
+
+            print(
+                f"PR-AUC    : {pr_auc:.4f}"
+            )
+
+
+# ============================================================
+# SUPERVISED MODEL
+# ============================================================
+
+def supervised_detection(
+    df: pd.DataFrame,
+    target_column: str
+):
+
+    if target_column not in df.columns:
+
+        raise ValueError(
+            f"Target column '{target_column}' "
+            "was not found."
+        )
+
+    y = df[target_column]
+
+    # The baseline expects binary labels.
+    unique_labels = set(
+        y.dropna().unique()
+    )
+
+    if not unique_labels.issubset({0, 1}):
+
+        raise ValueError(
+            "The anomaly column must contain "
+            "binary 0/1 labels."
+        )
+
+    X = prepare_features(
+        df,
+        target_column
+    )
+
+    # IMPORTANT:
+    # Split BEFORE fitting preprocessing/model.
+    # This prevents information from the test set
+    # leaking into training.
+    X_train, X_test, y_train, y_test = train_test_split(
+
+        X,
+        y,
+
+        test_size=0.20,
+
+        random_state=RANDOM_STATE,
+
+        stratify=y
+    )
+
+    model = Pipeline(
+        steps=[
+
+            (
+                "imputer",
+                SimpleImputer(
+                    strategy="median"
+                )
+            ),
+
+            (
+                "classifier",
+                RandomForestClassifier(
+
+                    n_estimators=300,
+
+                    class_weight="balanced",
+
+                    random_state=RANDOM_STATE,
+
+                    n_jobs=-1
+                )
+            )
+        ]
+    )
+
+    print("\nTraining Random Forest...")
+
+    model.fit(
+        X_train,
+        y_train
+    )
+
+    predictions = model.predict(
+        X_test
+    )
+
+    probabilities = model.predict_proba(
+        X_test
+    )[:, 1]
+
+    evaluate_classifier(
+        y_test,
+        predictions,
+        probabilities
+    )
+
+    # --------------------------------------------------------
+    # FEATURE IMPORTANCE
+    # --------------------------------------------------------
+
+    classifier = model.named_steps[
+        "classifier"
+    ]
+
+    importance = pd.Series(
+
+        classifier.feature_importances_,
+
+        index=X.columns,
+
+        name="importance"
+
+    ).sort_values(
+        ascending=False
+    )
+
+    print("\n" + "=" * 70)
+    print("TOP SENSOR FEATURES")
+    print("=" * 70)
+
+    print(
+        importance.head(15)
+    )
+
+    importance.to_csv(
+        "feature_importance.csv"
+    )
+
+    # --------------------------------------------------------
+    # SAVE PREDICTIONS
+    # --------------------------------------------------------
+
+    predictions_df = X_test.copy()
+
+    predictions_df[
+        "actual_anomaly"
+    ] = y_test.values
+
+    predictions_df[
+        "predicted_anomaly"
+    ] = predictions
+
+    predictions_df[
+        "anomaly_probability"
+    ] = probabilities
+
+    predictions_df.to_csv(
+        "supervised_predictions.csv",
+        index=False
+    )
+
+    print(
+        "\nSaved:"
+        "\n  feature_importance.csv"
+        "\n  supervised_predictions.csv"
+    )
+
+
+# ============================================================
+# UNSUPERVISED MODEL
+# ============================================================
+
+def unsupervised_detection(
+    df: pd.DataFrame
+):
+
+    X = prepare_features(df)
+
+    model = Pipeline(
+        steps=[
+
+            (
+                "imputer",
+                SimpleImputer(
+                    strategy="median"
+                )
+            ),
+
+            (
+                "detector",
+                IsolationForest(
+
+                    n_estimators=300,
+
+                    contamination="auto",
+
+                    random_state=RANDOM_STATE,
+
+                    n_jobs=-1
+                )
+            )
+        ]
+    )
+
+    print(
+        "\nTraining Isolation Forest..."
+    )
+
+    model.fit(X)
+
+    # Isolation Forest:
+    # +1 -> normal
+    # -1 -> anomaly
+    raw_predictions = model.predict(X)
+
+    anomaly_scores = (
+        -model.decision_function(X)
+    )
+
+    result = df.copy()
+
+    result[
+        "predicted_anomaly"
+    ] = (
+        raw_predictions == -1
+    ).astype(int)
+
+    result[
+        "anomaly_score"
+    ] = anomaly_scores
+
+    normal_count = (
+        result["predicted_anomaly"] == 0
+    ).sum()
+
+    anomaly_count = (
+        result["predicted_anomaly"] == 1
+    ).sum()
+
+    print("\n" + "=" * 70)
+    print("UNSUPERVISED RESULTS")
+    print("=" * 70)
+
+    print(
+        f"Normal observations   : {normal_count}"
+    )
+
+    print(
+        f"Anomalous observations: {anomaly_count}"
+    )
+
+    result = result.sort_values(
+        "anomaly_score",
+        ascending=False
+    )
+
+    result.to_csv(
+        "unsupervised_predictions.csv",
+        index=False
+    )
+
+    print(
+        "\nSaved:"
+        "\n  unsupervised_predictions.csv"
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Industrial Sensor "
+            "Anomaly Detection"
+        )
+    )
+
+    parser.add_argument(
+        "--data",
+        required=True,
+        help="Path to sensor CSV dataset."
+    )
+
+    parser.add_argument(
+        "--label",
+        default="anomaly",
+        help="Binary anomaly target column."
+    )
+
+    parser.add_argument(
+        "--unsupervised",
+        action="store_true",
+        help=(
+            "Use Isolation Forest instead "
+            "of supervised learning."
+        )
+    )
+
+    args = parser.parse_args()
+
+    df = load_dataset(
+        args.data
+    )
+
+    print(
+        f"Dataset shape: {df.shape}"
+    )
+
+    print("\nColumns:")
+    print(
+        list(df.columns)
+    )
+
+    if args.unsupervised:
+
+        unsupervised_detection(
+            df
+        )
+
+    else:
+
+        supervised_detection(
+            df,
+            args.label
+        )
+
+
+if __name__ == "__main__":
+    main()
